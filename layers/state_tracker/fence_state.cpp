@@ -65,43 +65,60 @@ bool vvl::Fence::EnqueueSignal(vvl::Queue *queue_state, uint64_t next_seq) {
     return false;
 }
 
+// Shared implementation of the non-blocking part of the state update.
+// Returns the future that becomes ready when the queue retires the fence's
+// submission (invalid if there is nothing to wait for), and hands back the
+// present submission reference that must be notified separately.
+std::shared_future<void> vvl::Fence::NotifyStateUpdate(std::optional<SubmissionReference> &present_submission_ref) {
+    std::shared_future<void> waiter;
+    // Hold the lock only while updating members, but not while waiting
+    auto guard = WriteLock();
+    if (state_ == kInflight) {
+        if (queue_) {
+            queue_->Notify(seq_);
+            waiter = waiter_;
+        } else {
+            state_ = kRetired;
+            completed_.set_value();
+            queue_ = nullptr;
+            seq_ = 0;
+            // Update the swapchain image acquire state if the fence was used by the acquire operation
+            if (acquired_image_swapchain_) {
+                assert(acquired_image_index_ != vvl::kNoIndex32);
+                acquired_image_swapchain_->images[acquired_image_index_].acquire_fence_status = AcquireSyncStatus::WasWaitedOn;
+                acquired_image_swapchain_.reset();
+                acquired_image_index_ = vvl::kNoIndex32;
+            }
+        }
+        present_submission_ref = std::move(present_submission_ref_);
+        present_submission_ref_.reset();
+    }
+    // Cleanup wait semaphores.
+    // NOTE: Functions like QueueWaitIdle put fence in the retired state, still it can have
+    // the list of present semaphores, which are not cleared by QueueWaitIdle when swapchain
+    // maintenance extension is enabled. That's the reason this code is not under kInflight condition.
+    for (auto &semaphore : present_wait_semaphores_) {
+        semaphore->ClearSwapchainWaitInfo();
+    }
+    present_wait_semaphores_.clear();
+    return waiter;
+}
+
+// Called from vkGetFenceStatus(), which must never block. Update the tracked
+// state and ask the relevant queues to make progress, but do not wait.
+void vvl::Fence::Notify(const Location &loc) {
+    (void)loc;
+    std::optional<SubmissionReference> present_submission_ref;
+    NotifyStateUpdate(present_submission_ref);
+    if (present_submission_ref.has_value()) {
+        present_submission_ref->queue->Notify(present_submission_ref->seq);
+    }
+}
+
 // Called from a non-queue operation, such as vkWaitForFences()|
 void vvl::Fence::NotifyAndWait(const Location &loc) {
-    std::shared_future<void> waiter;
     std::optional<SubmissionReference> present_submission_ref;
-    {
-        // Hold the lock only while updating members, but not
-        // while waiting
-        auto guard = WriteLock();
-        if (state_ == kInflight) {
-            if (queue_) {
-                queue_->Notify(seq_);
-                waiter = waiter_;
-            } else {
-                state_ = kRetired;
-                completed_.set_value();
-                queue_ = nullptr;
-                seq_ = 0;
-                // Update the swapchain image acquire state if the fence was used by the acquire operation
-                if (acquired_image_swapchain_) {
-                    assert(acquired_image_index_ != vvl::kNoIndex32);
-                    acquired_image_swapchain_->images[acquired_image_index_].acquire_fence_status = AcquireSyncStatus::WasWaitedOn;
-                    acquired_image_swapchain_.reset();
-                    acquired_image_index_ = vvl::kNoIndex32;
-                }
-            }
-            present_submission_ref = std::move(present_submission_ref_);
-            present_submission_ref_.reset();
-        }
-        // Cleanup wait semaphores.
-        // NOTE: Functions like QueueWaitIdle put fence in the retired state, still it can have
-        // the list of present semaphores, which are not cleared by QueueWaitIdle when swapchain
-        // maintenance extension is enabled. That's the reason this code is not under kInflight condition.
-        for (auto &semaphore : present_wait_semaphores_) {
-            semaphore->ClearSwapchainWaitInfo();
-        }
-        present_wait_semaphores_.clear();
-    }
+    std::shared_future<void> waiter = NotifyStateUpdate(present_submission_ref);
     if (waiter.valid()) {
         auto result = waiter.wait_until(GetCondWaitTimeout());
         if (result != std::future_status::ready) {

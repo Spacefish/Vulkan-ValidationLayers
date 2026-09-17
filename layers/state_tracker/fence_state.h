@@ -59,6 +59,10 @@ class Fence : public RefcountedStateObject {
     // to update state.
     void NotifyAndWait(const Location &loc);
 
+    // Notify the queue that the fence has signalled without waiting for the
+    // state update. Used by vkGetFenceStatus(), which must not block.
+    void Notify(const Location &loc);
+
     // Update state of the completed fence. This should only be called by Queue.
     void Retire();
 
@@ -82,6 +86,8 @@ class Fence : public RefcountedStateObject {
   private:
     ReadLockGuard ReadLock() const { return ReadLockGuard(lock_); }
     WriteLockGuard WriteLock() { return WriteLockGuard(lock_); }
+
+    std::shared_future<void> NotifyStateUpdate(std::optional<SubmissionReference> &present_submission_ref);
 
     Queue *queue_{nullptr};
     uint64_t seq_{0};
