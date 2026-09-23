@@ -1619,10 +1619,15 @@ void DeviceState::PostCallRecordGetFenceStatus(VkDevice device, VkFence fence, c
         return;
     }
     if (auto fence_state = Get<Fence>(fence)) {
-        // vkGetFenceStatus() must not block. Only notify the queue and let it retire the
-        // submission asynchronously. Calling the blocking NotifyAndWait() here would hold the
-        // device-wide lock while waiting for the queue thread and can stall the application.
+        // vkGetFenceStatus() must not block. Notify the queue so its thread can retire the
+        // submission, and retire the fence state now as well: the driver just reported the
+        // fence signaled, so it cannot still be associated with incomplete work. Without the
+        // early retire, a subsequent vkResetFences() is flagged as resetting an in-flight
+        // fence (VUID-vkResetFences-pFences-01123) until the queue thread catches up, which
+        // shows up as false positives in the SteamVR compositor (it polls a fence and then
+        // resets it immediately).
         fence_state->Notify(record_obj.location);
+        fence_state->Retire();
     }
 }
 

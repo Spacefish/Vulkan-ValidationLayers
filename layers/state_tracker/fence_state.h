@@ -63,7 +63,8 @@ class Fence : public RefcountedStateObject {
     // state update. Used by vkGetFenceStatus(), which must not block.
     void Notify(const Location &loc);
 
-    // Update state of the completed fence. This should only be called by Queue.
+    // Update state of the completed fence. Called by Queue when a submission retires, and by
+    // vkGetFenceStatus() when the driver reports the fence signaled (non-blocking path).
     void Retire();
 
     // vkResetFences
