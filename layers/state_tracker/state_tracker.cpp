@@ -1619,15 +1619,14 @@ void DeviceState::PostCallRecordGetFenceStatus(VkDevice device, VkFence fence, c
         return;
     }
     if (auto fence_state = Get<Fence>(fence)) {
-        // vkGetFenceStatus() must not block. Notify the queue so its thread can retire the
-        // submission, and retire the fence state now as well: the driver just reported the
-        // fence signaled, so it cannot still be associated with incomplete work. Without the
-        // early retire, a subsequent vkResetFences() is flagged as resetting an in-flight
-        // fence (VUID-vkResetFences-pFences-01123) until the queue thread catches up, which
-        // shows up as false positives in the SteamVR compositor (it polls a fence and then
-        // resets it immediately).
-        fence_state->Notify(record_obj.location);
-        fence_state->Retire();
+        // vkGetFenceStatus() must not block on device work. Notify the queue and drain its
+        // submission bookkeeping so the semaphore / command buffer reference counts are
+        // released before the application can recycle them - polling a fence to signaled and
+        // then immediately reusing such a resource otherwise looks like a pending operation to
+        // validation (e.g. VUID-vkAcquireNextImageKHR-semaphore-01779, which upstream documents
+        // as a false positive for the acquire/wait/acquire pattern). The drain waits only for
+        // the queue thread's bookkeeping, never for the GPU.
+        fence_state->NotifyAndDrainQueue(record_obj.location);
     }
 }
 

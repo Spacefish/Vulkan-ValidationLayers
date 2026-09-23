@@ -63,6 +63,13 @@ class Fence : public RefcountedStateObject {
     // state update. Used by vkGetFenceStatus(), which must not block.
     void Notify(const Location &loc);
 
+    // Like Notify(), but also lets the queue thread retire the submission now
+    // (which drops the wait/signal semaphore and command-buffer reference
+    // counts). Queue::Wait is host bookkeeping only - it returns immediately if
+    // the submission is already retired and never waits on the GPU - so this
+    // stays non-blocking with respect to device work, unlike NotifyAndWait().
+    void NotifyAndDrainQueue(const Location &loc);
+
     // Update state of the completed fence. Called by Queue when a submission retires, and by
     // vkGetFenceStatus() when the driver reports the fence signaled (non-blocking path).
     void Retire();

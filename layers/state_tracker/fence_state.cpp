@@ -115,6 +115,36 @@ void vvl::Fence::Notify(const Location &loc) {
     }
 }
 
+// Called from vkGetFenceStatus(), which must never block on device work. Notify
+// the queue *and* let its thread retire the submission that references this
+// fence, so the wait/signal semaphore and command buffer reference counts are
+// dropped before the application can recycle them. Without the drain,
+// vkGetFenceStatus() polling leaves those counts raised until the queue thread
+// happens to run, which produces false positives such as
+// VUID-vkAcquireNextImageKHR-semaphore-01779 for an acquire/wait/acquire pattern
+// even though the wait has completed (see the TODO at that check).
+void vvl::Fence::NotifyAndDrainQueue(const Location &loc) {
+    // Capture the submission this fence is waiting on before the state changes.
+    vvl::Queue *queue = nullptr;
+    uint64_t seq = 0;
+    {
+        auto guard = WriteLock();
+        if (state_ == kInflight && queue_ != nullptr) {
+            queue = queue_;
+            seq = seq_;
+        }
+    }
+    std::optional<SubmissionReference> present_submission_ref;
+    NotifyStateUpdate(present_submission_ref);
+    if (present_submission_ref.has_value()) {
+        present_submission_ref->queue->Notify(present_submission_ref->seq);
+    }
+    if (queue != nullptr) {
+        queue->Wait(loc, seq);
+    }
+    Retire();
+}
+
 // Called from a non-queue operation, such as vkWaitForFences()|
 void vvl::Fence::NotifyAndWait(const Location &loc) {
     std::optional<SubmissionReference> present_submission_ref;
